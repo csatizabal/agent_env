@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IndraBot - Asistente Cognitivo</title>
+    <!-- Librería para tomar capturas de pantalla del HTML -->
+    <script src="{{ url_for('static', filename='js/html2canvas.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/socket.io.js') }}"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f0f2f5; }
+        .main-container { display: flex; height: 100vh; }
+        .web-simulation { flex: 3; padding: 20px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; }
+        .assistant-panel { flex: 2; display: flex; flex-direction: column; background: #f8f9fa; }
+        h1, h2 { color: #0033a0; border-bottom: 2px solid #00a3e0; padding-bottom: 5px;}
+        .product-card { border: 1px solid #ccc; border-radius: 8px; padding: 15px; margin-bottom: 15px; transition: all 0.3s ease; }
+        .product-card.highlight { box-shadow: 0 0 15px 5px #00a3e0; border-color: #00a3e0; transform: scale(1.02); }
+        .tooltip { position: absolute; background-color: #333; color: white; padding: 8px; border-radius: 4px; z-index: 100; display: none; }
+
+        #chatbox { flex-grow: 1; overflow-y: auto; padding: 15px; }
+        .message { padding: 10px 15px; margin-bottom: 10px; border-radius: 20px; max-width: 80%; line-height: 1.5; }
+        .user-message { background: #00a3e0; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
+        .assistant-message { background: #e4e6eb; color: #050505; margin-right: auto; border-bottom-left-radius: 5px; }
+
+        #input-area { display: flex; padding: 15px; border-top: 1px solid #ddd; gap: 10px; align-items: center; }
+        #userInput { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; }
+        #voiceButton { background: #0033a0; color: white; border: none; border-radius: 50%; width: 45px; height: 45px; cursor: pointer; display: flex; justify-content: center; align-items: center; }
+        #voiceButton.recording { background-color: #d93025; }
+        #voiceButton svg { width: 24px; height: 24px; fill: white; }
+    </style>
+</head>
+<body>
+
+<div class="main-container">
+    <div class="web-simulation" id="web-simulation-area">
+        <h1>Portal de Seguros Indra</h1>
+        <h2>Seguros de Automóvil</h2>
+        <div class="product-card" id="poliza-auto-estandar">
+            <h3>Póliza Estándar de Auto</h3>
+            <p>Cobertura básica para tu vehículo. Incluye Robo e Incendio.</p>
+            <p><strong>Precio:</strong> $25,000 COP/mes</p>
+        </div>
+        <div class="product-card" id="poliza-auto-premium">
+            <h3>Póliza Premium de Auto</h3>
+            <p>Cobertura completa con beneficios adicionales como Asistencia 24/7 y Conductor Elegido.</p>
+            <p><strong>Precio:</strong> $35,000 COP/mes</p>
+        </div>
+        <h2>Seguros de Hogar</h2>
+        <div class="product-card" id="poliza-hogar-basico">
+            <h3>Seguro de Hogar Básico</h3>
+            <p>Protección esencial contra incendios y robos.</p>
+            <p><strong>Precio:</strong> $15,000 COP/mes</p>
+        </div>
+    </div>
+
+    <div class="assistant-panel">
+        <div id="chatbox">
+            <div class="message assistant-message">Hola, soy IndraBot. ¿En qué puedo ayudarte hoy? Puedes usar el micrófono para hablar conmigo.</div>
+        </div>
+        <div id="input-area">
+            <input type="text" id="userInput" placeholder="O escribe tu mensaje...">
+            <button id="voiceButton" title="Activar/Desactivar micrófono">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+            </button>
+        </div>
+    </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const socket = io();
+    const session_id = "user_" + Math.random().toString(36).substring(2, 9);
+
+    const chatbox = document.getElementById('chatbox');
+    const userInput = document.getElementById('userInput');
+    const voiceButton = document.getElementById('voiceButton');
+    const webSimulationArea = document.getElementById('web-simulation-area');
+    const tooltip = document.getElementById('tooltip');
+
+    // --- Lógica de Speech-to-Text (Reconocimiento de Voz) ---
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition;
+    if (SpeechRecognition) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.lang = 'es-ES';
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        voiceButton.addEventListener('click', () => {
+            if (voiceButton.classList.contains('recording')) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        });
+
+        recognition.onstart = () => {
+            voiceButton.classList.add('recording');
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            userInput.value = transcript;
+            sendMessage(transcript);
+        };
+
+        recognition.onerror = (event) => {
+            console.error('Error en reconocimiento de voz:', event.error);
+            voiceButton.classList.remove('recording');
+        };
+        
+        recognition.onend = () => {
+            voiceButton.classList.remove('recording');
+        };
+    } else {
+        voiceButton.disabled = true;
+        console.warn("La API de reconocimiento de voz no es compatible con este navegador.");
+    }
+
+    userInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && userInput.value.trim() !== '') {
+            sendMessage(userInput.value.trim());
+        }
+    });
+
+    // --- Función Principal de Envío de Mensaje ---
+    const sendMessage = async (messageText) => {
+        if (!messageText) return;
+
+        addMessage('user', messageText);
+        userInput.value = '';
+
+        // ¡Magia! Tomamos la captura de la "página web" simulada
+        const canvas = await html2canvas(webSimulationArea);
+        const screenshot_b64 = canvas.toDataURL('image/png').split(',')[1];
+
+        // Enviamos el texto Y la captura de pantalla
+        socket.emit('mensaje_usuario', { 
+            mensaje: messageText, 
+            screenshot: screenshot_b64,
+            session_id 
+        });
+    };
+
+    // --- Recepción de Mensajes y Acciones desde el Backend ---
+    socket.on('mensaje_asistente', (data) => {
+        addMessage('assistant', data.respuesta_texto);
+        if (data.audio_b64) {
+            const audio = new Audio("data:audio/mp3;base64," + data.audio_b64);
+            audio.play();
+        }
+    });
+
+    socket.on('accion_ui', (data) => {
+        console.log("Recibida acción UI:", data);
+        const targetElement = document.querySelector(data.selector);
+        if (!targetElement) {
+            console.error(`Elemento no encontrado para el selector: ${data.selector}`);
+            return;
+        }
+
+        // Limpiar resaltados anteriores
+        document.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight'));
+        
+        if (data.accion === 'resaltar') {
+            targetElement.classList.add('highlight');
+            targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else if (data.accion === 'mostrar_tooltip') {
+            tooltip.textContent = data.texto;
+            const rect = targetElement.getBoundingClientRect();
+            tooltip.style.left = `${rect.left + window.scrollX}px`;
+            tooltip.style.top = `${rect.bottom + window.scrollY + 5}px`;
+            tooltip.style.display = 'block';
+            setTimeout(() => { tooltip.style.display = 'none'; }, 5000); // Ocultar después de 5s
+        }
+    });
+
+    const addMessage = (sender, text) => {
+        const msgDiv = document.createElement('div');
+        msgDiv.classList.add('message', sender === 'user' ? 'user-message' : 'assistant-message');
+        msgDiv.textContent = text;
+        chatbox.appendChild(msgDiv);
+        chatbox.scrollTop = chatbox.scrollHeight;
+    };
+});
+</script>
+
+</body>
+</html>

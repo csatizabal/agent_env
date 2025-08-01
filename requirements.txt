@@ -1,0 +1,22 @@
+# requirements.txt
+
+# Core web framework
+Flask>=2.0
+Flask-SocketIO>=5.0
+python-engineio>=4.0
+eventlet
+
+# Langchain ecosystem (specifying minimum versions for compatibility)
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langchain-google-vertexai>=1.0.0
+
+# Google Cloud dependencies
+google-cloud-aiplatform
+google-auth
+
+google-cloud-texttospeech
+python-dotenv
+pillow
+

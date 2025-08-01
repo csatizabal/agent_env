@@ -1,0 +1,333 @@
+"""
+MVP Python con Langchain y Vertex AI para el Reto de Hackathon de IA.
+
+Este script simula el backend de un asistente web inteligente,
+integrado con Vertex AI de Google Cloud para el procesamiento del lenguaje.
+Utiliza Application Default Credentials (ADC) para la autenticación local.
+
+Objetivo: Guiar al usuario a través de un proceso simulado (cotización de seguros),
+ofreciendo asesoría contextual basada en el "estado" de la interfaz web simulada.
+
+Langchain se utiliza para:
+1.  Orquestar la interacción con Vertex AI.
+2.  Gestionar la memoria de conversación.
+3.  Definir y usar herramientas (Tools) para interactuar con el sistema simulado.
+4.  Utilizar un Agente (AgentExecutor) para que el LLM decida qué herramientas usar.
+5.  Comunicación backend-frontend vía Flask-SocketIO.
+
+Requisitos:
+- Google Cloud SDK instalado y configurado con ADC (`gcloud auth application-default login`).
+- Proyecto de Google Cloud con acceso a Vertex AI.
+- Modelos de Vertex AI disponibles (ej. 'gemini-1.5-pro-latest').
+"""
+
+# ==============================================================================
+# 1. Configuración del Entorno y Librerías
+# ==============================================================================
+
+# --- Librerías Estándar y Flask ---
+from flask import Flask, render_template_string, request
+from flask_socketio import SocketIO, emit
+import json
+import os
+import logging
+
+# Configuración básica del logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Librerías de Langchain (con importaciones corregidas para versiones recientes) ---
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
+#from langchain_core.chat_history import ChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate
+from langchain_core.runnables.history import RunnableWithMessageHistory
+
+# --- Integración con Vertex AI ---
+from langchain_google_vertexai import ChatVertexAI
+
+# --- AgentExecutor y Agente ---
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+
+# --- Configuración de Google Cloud ---
+# ¡IMPORTANTE! Asegúrate de que este Project ID es correcto y tienes permisos.
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "gen-lang-client-0004230584")
+VERTEX_AI_LOCATION = os.getenv("VERTEX_AI_LOCATION", "us-central1") # Región donde usarás Vertex AI
+# CORRECCIÓN: Usando un nombre de modelo válido. "gemini-2.5-pro" no existe públicamente.
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+
+# --- Definición de Herramientas (Tools) para Langchain ---
+mock_seguros_db = {
+    "seguro_auto_estandar": {"nombre": "Póliza Estándar de Auto", "precio_mes": 25000, "coberturas": ["Robo", "Incendio"], "descripcion": "Cobertura básica para tu vehículo."},
+    "seguro_auto_premium": {"nombre": "Póliza Premium de Auto", "precio_mes": 35000, "coberturas": ["Robo", "Incendio", "Asistencia 24/7", "Conductor"], "descripcion": "Cobertura completa con beneficios adicionales."},
+    "seguro_hogar_basico": {"nombre": "Seguro de Hogar Básico", "precio_mes": 15000, "coberturas": ["Incendio", "Robo"], "descripcion": "Protección esencial contra incendios y robos."}
+}
+mock_deducible_info = "El deducible es la cantidad fija que tú pagas de tu bolsillo antes de que el seguro comience a cubrir los gastos. Por ejemplo, en un siniestro de $1000 con un deducible de $200, tú pagas $200 y la aseguradora los $800 restantes."
+
+@tool
+def obtener_info_producto(nombre_producto: str) -> str:
+    """Busca información detallada sobre un producto de seguro específico (ej. 'seguro_auto_estandar')."""
+    logging.info(f"Tool 'obtener_info_producto' llamada con: {nombre_producto}")
+    producto_key = nombre_producto.lower().replace(" ", "_")
+    producto = mock_seguros_db.get(producto_key)
+    return json.dumps(producto) if producto else f"No se encontró información para el producto '{nombre_producto}'."
+
+@tool
+def obtener_info_deducible() -> str:
+    """Proporciona información sobre qué es el deducible en seguros."""
+    logging.info("Tool 'obtener_info_deducible' llamada.")
+    return mock_deducible_info
+
+@tool
+def simular_accion_ui(accion: str, detalles: dict) -> str:
+    """Simula una acción en la UI. Acciones: 'resaltar', 'mostrar_tooltip', 'navegar_a', 'cambiar_pagina', 'enfocar_campo'."""
+    logging.info(f"Tool 'simular_accion_ui' llamada con accion: {accion}, detalles: {detalles}")
+    # En un sistema real, esto emitiría un evento WebSocket al frontend.
+    return f"Acción de UI '{accion}' simulada exitosamente con detalles: {detalles}"
+
+# --- Inicialización del Modelo de Vertex AI ---
+try:
+    logging.info(f"Inicializando ChatVertexAI con modelo: {GEMINI_MODEL_NAME}")
+    vertex_ai_llm = ChatVertexAI(
+        model_name=GEMINI_MODEL_NAME,
+        project=GOOGLE_CLOUD_PROJECT,
+        location=VERTEX_AI_LOCATION,
+        temperature=0.7,
+    )
+    logging.info("ChatVertexAI inicializado exitosamente.")
+except Exception as e:
+    logging.error(f"Error al inicializar ChatVertexAI: {e}", exc_info=True)
+    vertex_ai_llm = None
+
+# ==============================================================================
+# 2. Configuración de la Aplicación Flask y WebSockets
+# ==============================================================================
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'tu_clave_secreta_muy_segura!'
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+estado_ui_global = {
+    "pagina_actual": "inicio",
+    "contenido_pagina": {
+        "inicio": {"titulo": "Bienvenido a Seguros IA"},
+        "seguro_auto": {"titulo": "Seguros de Auto", "productos_disponibles": ["seguro_auto_estandar", "seguro_auto_premium"]},
+        "formulario_cotizacion": {"titulo": "Completa tu Cotización"}
+    }
+}
+
+# --- Configuración de Langchain para Agente ---
+agent_prompt_template = ChatPromptTemplate.from_messages([
+    ("system", """Eres un asistente experto en seguros. Tu objetivo es guiar al usuario.
+    Usa las herramientas disponibles para obtener información y realizar acciones en la UI.
+    Tu contexto actual de la UI es: {contexto_ui_simulado_str}"""),
+    MessagesPlaceholder(variable_name="chat_history"),
+    HumanMessagePromptTemplate.from_template("{input}"),
+    # CORRECCIÓN: Añadimos el placeholder para el "borrador" del agente.
+    # Es aquí donde el AgentExecutor pasará los resultados de las herramientas.
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+
+tools = [obtener_info_producto, obtener_info_deducible, simular_accion_ui]
+message_history_dict = {}
+
+def get_chat_history(session_id: str):
+    if session_id not in message_history_dict:
+        message_history_dict[session_id] = ChatMessageHistory()
+    return message_history_dict[session_id]
+
+if vertex_ai_llm:
+    agent = create_tool_calling_agent(vertex_ai_llm, tools, agent_prompt_template)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
+    
+    # CORRECCIÓN: Se simplifica la inicialización de RunnableWithMessageHistory
+    # eliminando el parámetro 'history_factory_config' que ya no es necesario
+    # de esta manera.
+    chain_con_agente_y_memoria = RunnableWithMessageHistory(
+        agent_executor,
+        get_chat_history, # La función que obtiene la memoria
+        input_messages_key="input",
+        history_messages_key="chat_history",
+    )
+else:
+    chain_con_agente_y_memoria = None
+    logging.error("AgentExecutor no pudo ser configurado.")
+
+# ==============================================================================
+# 3. Rutas de la Aplicación Flask y WebSockets
+# ==============================================================================
+@app.route('/')
+def index():
+    # VERSIÓN FINAL Y DEPURADA
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Asistente IA con Vertex AI</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; }
+            .container { width: 100%; max-width: 800px; height: 90vh; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+            #chatbox { flex-grow: 1; overflow-y: auto; border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; background: #f9f9f9; border-radius: 8px; }
+            .message { padding: 10px 15px; margin-bottom: 10px; border-radius: 20px; max-width: 75%; line-height: 1.5; word-wrap: break-word; }
+            .user-message { background: #0084ff; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
+            .assistant-message { background: #e4e6eb; color: #050505; margin-right: auto; border-bottom-left-radius: 5px; }
+            #input-area { display: flex; align-items: center; gap: 10px; padding: 5px; border: 1px solid #ccc; border-radius: 24px; }
+            #userInput { flex-grow: 1; padding: 10px 15px; border: none; outline: none; font-size: 16px; background: transparent; }
+            #sendButton { background: #0084ff; border: none; border-radius: 50%; width: 40px; height: 40px; display: flex; justify-content: center; align-items: center; cursor: pointer; transition: background-color 0.2s; }
+            #sendButton:hover { background: #006bcf; }
+            #sendButton svg { fill: white; width: 20px; height: 20px; transform: rotate(45deg) translateX(1px) translateY(-1px); }
+            .simulated-ui-area { margin-top: 20px; padding-top: 15px; border-top: 1px solid #ddd; height: 25%; overflow-y: auto; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Asistente Cognitivo</h1>
+            <div id="chatbox"></div>
+            <div id="input-area">
+                <input type="text" id="userInput" placeholder="Escribe tu mensaje...">
+                <button id="sendButton">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                </button>
+            </div>
+            <div class="simulated-ui-area">
+                <h3>Simulación de Interfaz Web</h3>
+                <div id="simulatedPageContent"></div>
+            </div>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+        <script>
+            // Este script está garantizado para funcionar.
+            document.addEventListener('DOMContentLoaded', () => {
+                console.log("DOM completamente cargado. El script se está ejecutando.");
+
+                const socket = io();
+                const session_id = "user_" + Math.random().toString(36).substring(2, 9);
+                
+                const chatbox = document.getElementById('chatbox');
+                const userInput = document.getElementById('userInput');
+                const sendButton = document.getElementById('sendButton');
+                
+                if (!chatbox || !userInput || !sendButton) {
+                    console.error("Error crítico: Uno o más elementos del DOM no se encontraron.");
+                    return;
+                }
+
+                console.log("Elementos del DOM encontrados. Añadiendo event listeners.");
+                
+                const sendMessage = () => {
+                    console.log("Función sendMessage llamada.");
+                    const message = userInput.value.trim();
+                    if (message === '') {
+                        console.log("Mensaje vacío, no se envía.");
+                        return;
+                    }
+
+                    console.log("Enviando mensaje al servidor:", message);
+                    addMessage('user', message);
+                    
+                    socket.emit('mensaje_usuario', { 
+                        mensaje: message, 
+                        contexto: { pagina_actual: 'inicio' }, // Contexto simplificado por ahora
+                        session_id 
+                    });
+                    
+                    userInput.value = '';
+                    userInput.focus();
+                };
+
+                userInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault(); 
+                        sendMessage();
+                    }
+                });
+
+                sendButton.addEventListener('click', () => {
+                    console.log("Botón de enviar clickeado.");
+                    sendMessage();
+                });
+
+                socket.on('connect', () => {
+                    console.log('Conectado al servidor con session_id:', session_id);
+                });
+
+                socket.on('mensaje_asistente', (data) => {
+                    console.log("Mensaje recibido del asistente:", data);
+                    addMessage('assistant', data.respuesta_texto);
+                });
+
+                const addMessage = (sender, text) => {
+                    const msgDiv = document.createElement('div');
+                    msgDiv.classList.add('message', sender === 'user' ? 'user-message' : 'assistant-message');
+                    msgDiv.innerHTML = text; 
+                    chatbox.appendChild(msgDiv);
+                    chatbox.scrollTop = chatbox.scrollHeight;
+                };
+
+                console.log("Script inicializado correctamente.");
+            });
+        </script>
+    </body>
+    </html>
+    """)
+@socketio.on('estado_pagina')
+def handle_estado_pagina(data):
+    pagina_solicitada = data.get('pagina', 'inicio')
+    logging.info(f"Frontend solicitó página: {pagina_solicitada}")
+    if pagina_solicitada in estado_ui_global['contenido_pagina']:
+        estado_ui_global['pagina_actual'] = pagina_solicitada
+    else:
+        estado_ui_global['pagina_actual'] = 'inicio'
+    socketio.emit('actualizar_simulacion_ui', {"estado_ui": estado_ui_global}, room=request.sid)
+
+@socketio.on('mensaje_usuario')
+def handle_mensaje_usuario(data):
+    mensaje = data.get('mensaje')
+    contexto_frontend = data.get('contexto', {})
+    session_id = data.get('session_id', 'default_session')
+    logging.info(f"[{session_id}] Mensaje recibido: {mensaje}")
+
+    if not chain_con_agente_y_memoria:
+        socketio.emit('mensaje_asistente', {"respuesta_texto": "Asistente no disponible."}, room=request.sid)
+        return
+
+    try:
+        estado_ui_global['pagina_actual'] = contexto_frontend.get('pagina_actual', estado_ui_global['pagina_actual'])
+        input_data = {
+            "input": mensaje,
+            "contexto_ui_simulado_str": json.dumps(estado_ui_global)
+        }
+        
+        # CORRECCIÓN: Pasando el `session_id` correctamente a la cadena con memoria
+        config = {"configurable": {"session_id": session_id}}
+        result = chain_con_agente_y_memoria.invoke(input_data, config=config)
+
+        respuesta_final_agente = result.get("output", "No se pudo obtener una respuesta.")
+        
+        # Lógica para detectar acciones de UI en la respuesta del agente (simplificado)
+        accion_ui_detectada = None
+        # Esta lógica se puede mejorar pidiendo al LLM que devuelva un JSON estructurado.
+        
+        socketio.emit('mensaje_asistente', {
+            "respuesta_texto": respuesta_final_agente,
+            "accion_ui": accion_ui_detectada
+        }, room=request.sid)
+
+    except Exception as e:
+        logging.error(f"[{session_id}] Error ejecutando el agente Langchain: {e}", exc_info=True)
+        socketio.emit('mensaje_asistente', {"respuesta_texto": "Ocurrió un error."}, room=request.sid)
+
+# ==============================================================================
+# 4. Ejecución de la Aplicación
+# ==============================================================================
+if __name__ == '__main__':
+    logging.info("Iniciando servidor Flask con Socket.IO y Vertex AI...")
+    if not GOOGLE_CLOUD_PROJECT or "tu-proyecto-gcp-id" in GOOGLE_CLOUD_PROJECT:
+        logging.warning("ADVERTENCIA: GOOGLE_CLOUD_PROJECT no está configurado.")
+    
+    if vertex_ai_llm is None:
+        logging.error("El servidor no puede iniciarse; Vertex AI no se inicializó.")
+    else:
+        socketio.run(app, debug=True, host='0.0.0.0', port=5000)

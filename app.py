@@ -278,7 +278,6 @@ app.config['SECRET_KEY'] = 'indra-hackathon-2024-secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=10 * 1024 * 1024) # Aumentar buffer para imágenes
 
 @app.route('/')
-@app.route('/')
 def index():
     try:
         # 1. Obtiene la ruta absoluta del directorio donde se encuentra este script (app.py)

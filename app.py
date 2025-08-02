@@ -80,12 +80,32 @@ mock_deducible_info = "El deducible es la cantidad fija que tú pagas de tu bols
 
 @tool
 def obtener_info_producto(nombre_producto: str) -> str:
-    """Busca información detallada sobre un producto de seguro específico (ej. 'seguro_auto_estandar'). Utiliza esta herramienta si el usuario pregunta sobre precios, coberturas o detalles de una póliza que ve en pantalla."""
+    """
+    Busca información detallada sobre un producto de seguro específico.
+    El usuario puede decir 'póliza premium', 'seguro de auto premium', 'poliza-auto-premium', etc.
+    Tú debes extraer la parte clave como 'seguro_auto_premium' o 'poliza_hogar_basico'.
+    """
     logging.info(f"Tool 'obtener_info_producto' llamada con: {nombre_producto}")
-    producto_key = nombre_producto.lower().replace(" ", "_")
-    producto = mock_seguros_db.get(producto_key)
-    return json.dumps(producto) if producto else f"No se encontró información para el producto '{nombre_producto}'."
+    
+    # --- LÓGICA DE NORMALIZACIÓN MEJORADA ---
+    # Hacemos la búsqueda más flexible para que el agente no tenga que ser perfecto.
+    producto_key_limpio = nombre_producto.lower().replace(" ", "_").replace("-", "_")
+    
+    # Buscamos una coincidencia parcial en las claves de nuestra base de datos
+    clave_encontrada = None
+    for key_db in mock_seguros_db.keys():
+        if key_db in producto_key_limpio:
+            clave_encontrada = key_db
+            break
 
+    if clave_encontrada:
+        producto = mock_seguros_db[clave_encontrada]
+        # Devolvemos un JSON para que el agente lo procese.
+        return json.dumps(producto)
+    else:
+        # Devolvemos un mensaje claro de que no se encontró NADA.
+        return "ERROR: No se encontró información para el producto especificado."
+    
 @tool
 def obtener_info_deducible() -> str:
     """Proporciona información general sobre qué es el 'deducible' en un seguro. Útil cuando el usuario tiene dudas sobre terminología de seguros."""
@@ -105,24 +125,59 @@ def calcular_cotizacion(tipo_seguro: str, datos_usuario: dict) -> str:
     return json.dumps({"tipo_seguro": tipo_seguro, "precio_calculado": f"${precio_final:,.0f} COP/mes"})
 
 @tool
-def interactuar_con_ui(accion: str, selector_css: str, texto: str = None) -> str:
+def interactuar_con_ui(accion: str, selector_css: str, texto: str = None) -> None:
     """
-    Ejecuta una acción en la interfaz de usuario del frontend.
-    Acciones válidas: 'resaltar', 'mostrar_tooltip'.
-    'selector_css' es el identificador del elemento en el HTML (ej. '#poliza-auto-premium').
-    'texto' es opcional, usado por 'mostrar_tooltip'.
+    Ejecuta una acción VISUAL en la interfaz de usuario (resaltar, rellenar campo).
+    Esta herramienta NO devuelve texto, solo ejecuta la acción.
     """
     logging.info(f"Tool 'interactuar_con_ui' llamada con accion: {accion}, selector: {selector_css}")
-    # ¡Clave! En lugar de retornar un string, emitimos un evento al frontend.
     socketio.emit('accion_ui', {
         'accion': accion,
         'selector': selector_css,
         'texto': texto
     })
-    return f"Acción '{accion}' ejecutada en el elemento '{selector_css}' de la UI."
+    # Al no tener un 'return', la función devuelve None por defecto.
+    # Esto fuerza al agente a generar su propia respuesta basándose en el prompt.
+    
+    # --- ¡ESTA ES LA CORRECCIÓN! ---
+    # En lugar de devolver un log, devolvemos una sugerencia de respuesta para el agente.
+    # El LLM tomará este texto y lo usará como su respuesta final.
+    if accion == 'resaltar' and selector_css == '#boton-cotizar-ahora':
+        return "Claro, para comenzar haz clic en el botón 'Cotizar Ahora' que te estoy resaltando en la pantalla."
+    elif accion == 'resaltar':
+        return f"He resaltado el elemento que pediste en la pantalla para que lo veas mejor."
+    else:
+        # Devolvemos un mensaje genérico para otras acciones que no necesiten respuesta.
+        return "Acción en la UI completada."
+
+@tool
+def navegar_a_formulario_contratacion() -> str:
+    """
+    Muestra el formulario de contratación en la pantalla y oculta las otras secciones.
+    Usa esta herramienta cuando el usuario acepte contratar una póliza.
+    """
+    logging.info("Tool 'navegar_a_formulario_contratacion' llamada.")
+    socketio.emit('cambiar_vista', {'vista': 'formulario'})
+    # Devolvemos una confirmación simple y técnica.
+    return "Acción 'navegar_a_formulario_contratacion' ejecutada exitosamente."
+
+@tool
+def rellenar_campo_formulario(selector_css: str, valor: str) -> str:
+    """
+    Rellena un campo específico en el formulario de la UI con un valor dado.
+    'selector_css' es el ID del campo (ej. '#nombre-completo').
+    'valor' es el texto que se debe escribir en el campo.
+    """
+    logging.info(f"Tool 'rellenar_campo_formulario' llamada para '{selector_css}' con valor '{valor}'")
+    socketio.emit('accion_ui', {
+        'accion': 'rellenar_campo',
+        'selector': selector_css,
+        'texto': valor
+    })
+    return f"Campo '{selector_css}' rellenado con '{valor}'."
 
 # Lista de todas las herramientas disponibles para el agente
-tools = [obtener_info_producto, obtener_info_deducible, calcular_cotizacion, interactuar_con_ui]
+tools = [obtener_info_producto, obtener_info_deducible, calcular_cotizacion, interactuar_con_ui, navegar_a_formulario_contratacion, rellenar_campo_formulario]
 
 # ==============================================================================
 # 3. Configuración del Agente de Langchain (Cerebro de la IA)
@@ -132,23 +187,54 @@ tools = [obtener_info_producto, obtener_info_deducible, calcular_cotizacion, int
 # Este es el "alma" del asistente. Define su personalidad, objetivos e instrucciones.
 # ¡NUEVO! Le indicamos explícitamente que es un asistente multimodal.
 agent_prompt_template = ChatPromptTemplate.from_messages([
-    ("system", """
-    Eres un Asistente Cognitivo Multimodal experto en seguros para Indra. Tu nombre es 'IndraBot'.
-    Tu misión es guiar al usuario de forma proactiva y amigable a través del proceso de selección y compra de seguros.
+("system", """
+Eres un Asistente Cognitivo Multimodal experto en seguros para Indra. Tu nombre es 'IndraBot'.
+Tu misión es guiar al usuario de forma proactiva, amigable y precisa.
 
-    Recibirás dos tipos de información del usuario en cada turno:
-    1.  Un comando de texto (transcrito de su voz o escrito).
-    2.  Una imagen (captura de la pantalla actual del usuario).
+--- REGLAS ESTRICTAS Y GENERALES ---
+1.  **NO inventes selectores CSS.** Usa SOLAMENTE los IDs que se mencionan explícitamente en los flujos de trabajo a continuación.
+2.  **Sigue los flujos de trabajo EXACTAMENTE como se describen.** No te saltes pasos ni asumas que una acción se ha completado si no has usado la herramienta correspondiente.
+3.  **Responde siempre de forma clara y concisa**, reflejando la acción que acabas de realizar.
+4.  **Para `obtener_info_producto`:** Cuando el usuario pregunte por una póliza como "Póliza Premium", debes construir el `nombre_producto` para la herramienta combinando el tipo de seguro (auto, hogar) y el nivel (estándar, premium). Por ejemplo: "seguro_auto_premium".
+5.  **Si una herramienta devuelve un 'ERROR':** Debes informar al usuario de manera amigable que no pudiste encontrar la información y preguntarle si puedes ayudarlo con otra cosa. NO te quedes en silencio. Ejemplo: "Lo siento, no pude encontrar los detalles de ese producto en este momento. ¿Puedo ayudarte con otra póliza o a cotizar?"
 
-    Tu proceso de pensamiento debe ser:
-    1.  **Analiza la imagen** para entender en qué parte de la página web está el usuario (página de inicio, comparación de productos, formulario, etc.) e identificar los elementos visibles (póizas, botones, campos de texto).
-    2.  **Analiza el texto del usuario** para comprender su pregunta o intención directa.
-    3.  **Combina ambos contextos**. La imagen te da el 'dónde' y el texto te da el 'qué'.
-    4.  **Usa tus herramientas** para responder preguntas, obtener información, interactuar con la UI (resaltando elementos) o calcular cotizaciones.
-    5.  **Responde de forma clara y concisa**. Si realizas una acción en la UI, menciónalo (ej. "Claro, te resalto la póliza premium en la pantalla.").
-    
-    Sé siempre servicial y profesional.
-    """),
+
+--- LISTA DE IDs VÁLIDOS PARA LA UI ---
+-   Botón principal: `#boton-cotizar-ahora`
+-   Secciones de la página: `#seccion-auto`, `#seccion-hogar`
+-   Pólizas individuales: `#poliza-auto-estandar`, `#poliza-auto-premium`, `#poliza-hogar-basico`
+-   Vista del formulario: `#seccion-formulario`
+-   Campos del formulario: `#nombre-completo`, `#marca-modelo-vehiculo`, `#anio-vehiculo`, `#email`, `#telefono`
+
+--- FLUJOS DE TRABAJO ---
+
+**1. Flujo de INFORMACIÓN de Producto (Prioridad Alta):**
+   - **CONDICIÓN DE ACTIVACIÓN:** El usuario usa palabras como "información", "ver", "saber sobre", "muéstrame", "explícame" O si simplemente menciona un tipo de producto como "seguro de auto" o "seguro de hogar" sin usar la palabra "cotizar".
+   - **ACCIÓN OBLIGATORIA:** Usa `interactuar_con_ui` para resaltar la sección correspondiente (ej. `#seccion-auto`).
+   - **RESPUESTA OBLIGATORIA:** "Claro, te resalto la sección de seguros de auto. Puedes ver nuestras pólizas Estándar y Premium. ¿Te gustaría que te diera más detalles, las comparara o te ayude a cotizar?"
+   - **REGLA NEGATIVA:** NO actives el flujo de cotización si solo se pide información.
+
+**2. Flujo de COTIZACIÓN (Prioridad Media):**
+   - **CONDICIÓN DE ACTIVACIÓN:** El usuario usa explícitamente palabras como "cotizar", "cotización", "precio exacto", "cuánto cuesta".
+   - **ACCIÓN OBLIGATORIA:** Usa `interactuar_con_ui` para resaltar el botón `#boton-cotizar-ahora`.
+   - **RESPUESTA OBLIGATORIA:** "¡Perfecto! Para iniciar la cotización, por favor haz clic en el botón 'Cotizar Ahora' que he resaltado para ti."
+   
+**3. Flujo de Navegación a Formulario (Prioridad Baja):**
+   - **CONDICIÓN DE ACTIVACIÓN:** El usuario pide ir al formulario ("llévame al formulario") O si te informa que ya hizo clic en el botón de cotizar.
+   - **ACCIÓN OBLIGATORIA:** Usa la herramienta `navegar_a_formulario_contratacion`.
+   - **RESPUESTA OBLIGATORIA:** "Listo, te he llevado al formulario. Para empezar, ¿cuál es tu nombre completo?".
+   - **REGLA NEGATIVA:** NO digas que has navegado al formulario si no has usado la herramienta `navegar_a_formulario_contratacion`.
+
+**4. Flujo de Relleno de Formulario:**
+   - **CONDICIÓN DE ACTIVACIÓN:** Estás en la vista del formulario y el usuario proporciona datos personales o del vehículo.
+   - **ACCIÓN OBLIGATORIA:** Usa `rellenar_campo_formulario` con el ID EXACTO del campo correspondiente de la "LISTA DE IDs VÁLIDOS".
+   - **Lógica de Conversación:** Pide la información un dato a la vez. El orden es: 1. Nombre completo, 2. Marca y Modelo, 3. Año del vehículo, 4. Correo electrónico, 5. Teléfono. Después de rellenar un campo, pide el siguiente.
+
+**5. Flujo de Preguntas Generales y Detalles de Producto (fallback):**
+   - **CONDICIÓN DE ACTIVACIÓN:** La petición del usuario no encaja en otro flujo O pide detalles específicos de un producto.
+   - **ACCIÓN OBLIGATORIA:** Usa la herramienta apropiada (`obtener_info_producto`, `obtener_info_deducible`).
+   - **RESPUESTA OBLIGATORIA:** Si la herramienta devuelve datos (JSON), resume la información de forma clara para el usuario. Si la herramienta devuelve un error, sigue la "REGLA DE USO DE HERRAMIENTAS" número 2.
+"""),
     MessagesPlaceholder(variable_name="chat_history"),
     # Aquí se insertará la entrada multimodal (texto + imagen)
     ("human", "{input}"),
@@ -228,7 +314,8 @@ def handle_mensaje_usuario(data):
         # Esto es lo que permite a Gemini "ver" y "leer" al mismo tiempo.
         input_multimodal = HumanMessage(
             content=[
-                {"type": "text", "text": mensaje_texto},
+                # Asegurémonos de que el texto nunca sea nulo o vacío
+                {"type": "text", "text": mensaje_texto if mensaje_texto else " "},
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},

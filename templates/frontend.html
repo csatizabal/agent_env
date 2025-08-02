@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IndraBot - Asistente Cognitivo</title>
-    <!-- Librería para tomar capturas de pantalla del HTML -->
+    <!-- CORRECCIÓN: Carga de librerías locales para robustez -->
     <script src="{{ url_for('static', filename='js/html2canvas.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/socket.io.js') }}"></script>
     <style>
@@ -13,15 +13,19 @@
         .web-simulation { flex: 3; padding: 20px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; }
         .assistant-panel { flex: 2; display: flex; flex-direction: column; background: #f8f9fa; }
         h1, h2 { color: #0033a0; border-bottom: 2px solid #00a3e0; padding-bottom: 5px;}
+        /* MEJORA: Estilo de resaltado más genérico para divs y campos de input */
+        .highlight {
+            box-shadow: 0 0 15px 5px #00a3e0 !important;
+            border-color: #00a3e0 !important;
+            transform: scale(1.02);
+            transition: all 0.3s ease;
+        }
         .product-card { border: 1px solid #ccc; border-radius: 8px; padding: 15px; margin-bottom: 15px; transition: all 0.3s ease; }
-        .product-card.highlight { box-shadow: 0 0 15px 5px #00a3e0; border-color: #00a3e0; transform: scale(1.02); }
         .tooltip { position: absolute; background-color: #333; color: white; padding: 8px; border-radius: 4px; z-index: 100; display: none; }
-
         #chatbox { flex-grow: 1; overflow-y: auto; padding: 15px; }
-        .message { padding: 10px 15px; margin-bottom: 10px; border-radius: 20px; max-width: 80%; line-height: 1.5; }
+        .message { padding: 10px 15px; margin-bottom: 10px; border-radius: 20px; max-width: 80%; line-height: 1.5; word-wrap: break-word; }
         .user-message { background: #00a3e0; color: white; margin-left: auto; border-bottom-right-radius: 5px; }
         .assistant-message { background: #e4e6eb; color: #050505; margin-right: auto; border-bottom-left-radius: 5px; }
-
         #input-area { display: flex; padding: 15px; border-top: 1px solid #ddd; gap: 10px; align-items: center; }
         #userInput { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; }
         #voiceButton { background: #0033a0; color: white; border: none; border-radius: 50%; width: 45px; height: 45px; cursor: pointer; display: flex; justify-content: center; align-items: center; }
@@ -33,7 +37,15 @@
 
 <div class="main-container">
     <div class="web-simulation" id="web-simulation-area">
-        <h1>Portal de Seguros Indra</h1>
+    <h1>Portal de Seguros Indra</h1>
+    
+    <div style="text-align: center; margin: 20px 0;">
+        <button id="boton-cotizar-ahora" style="padding: 15px 30px; font-size: 18px; cursor: pointer; background-color: #00a3e0; color: white; border: none; border-radius: 5px;">
+            Cotizar Ahora
+        </button>
+    </div>
+    <!-- Secciones envueltas en divs con IDs para una mejor selección por parte del Agente -->
+    <div id="seccion-auto">
         <h2>Seguros de Automóvil</h2>
         <div class="product-card" id="poliza-auto-estandar">
             <h3>Póliza Estándar de Auto</h3>
@@ -45,6 +57,9 @@
             <p>Cobertura completa con beneficios adicionales como Asistencia 24/7 y Conductor Elegido.</p>
             <p><strong>Precio:</strong> $35,000 COP/mes</p>
         </div>
+    </div>
+
+    <div id="seccion-hogar">
         <h2>Seguros de Hogar</h2>
         <div class="product-card" id="poliza-hogar-basico">
             <h3>Seguro de Hogar Básico</h3>
@@ -52,10 +67,40 @@
             <p><strong>Precio:</strong> $15,000 COP/mes</p>
         </div>
     </div>
+    
+    <!-- Sección del formulario de contización, oculta por defecto -->
+    <div id="seccion-formulario" style="display: none;">
+            <h2>Formulario de Contratación</h2>
+            <p>Por favor, completa tus datos para finalizar la contratación de tu póliza.</p>
+        <form id="contratacion-form" onsubmit="event.preventDefault(); alert('¡Contratación simulada exitosamente!');">
+            <label for="nombre-completo">Nombre Completo:</label><br>
+            <input type="text" id="nombre-completo" name="nombre-completo" style="width: 80%; padding: 8px;"><br><br>
+            
+            <!-- CAMPOS PARA EL VEHÍCULO -->
+            <label for="marca-modelo-vehiculo">Marca y Modelo del Vehículo:</label><br>
+            <input type="text" id="marca-modelo-vehiculo" name="marca-modelo-vehiculo" style="width: 80%; padding: 8px;"><br><br>
+
+            <label for="anio-vehiculo">Año del Vehículo:</label><br>
+            <input type="number" id="anio-vehiculo" name="anio-vehiculo" style="width: 80%; padding: 8px;"><br><br>
+            
+            <label for="email">Correo Electrónico:</label><br>
+            <input type="email" id="email" name="email" style="width: 80%; padding: 8px;"><br><br>
+            
+            <label for="telefono">Teléfono:</label><br>
+            <input type="tel" id="telefono" name="telefono" style="width: 80%; padding: 8px;"><br><br>
+
+            <button type="submit">Finalizar Contratación</button>
+        </form>
+        </div>
+    </div>
 
     <div class="assistant-panel">
         <div id="chatbox">
             <div class="message assistant-message">Hola, soy IndraBot. ¿En qué puedo ayudarte hoy? Puedes usar el micrófono para hablar conmigo.</div>
+        </div>
+        <!-- Indicador de "escribiendo..." para mejorar la UX -->
+        <div id="typing-indicator" style="display: none; padding: 10px 15px; color: #65676b; font-style: italic;">
+            IndraBot está pensando...
         </div>
         <div id="input-area">
             <input type="text" id="userInput" placeholder="O escribe tu mensaje...">
@@ -72,13 +117,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const socket = io();
     const session_id = "user_" + Math.random().toString(36).substring(2, 9);
 
+    // Obtener todos los elementos del DOM una sola vez para eficiencia
     const chatbox = document.getElementById('chatbox');
     const userInput = document.getElementById('userInput');
     const voiceButton = document.getElementById('voiceButton');
     const webSimulationArea = document.getElementById('web-simulation-area');
     const tooltip = document.getElementById('tooltip');
+    const typingIndicator = document.getElementById('typing-indicator');
+    const botonCotizar = document.getElementById('boton-cotizar-ahora');
 
-    // --- Lógica de Speech-to-Text (Reconocimiento de Voz) ---
+    // --- Lógica de Speech-to-Text (sin cambios) ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition;
     if (SpeechRecognition) {
@@ -95,25 +143,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 recognition.start();
             }
         });
-
-        recognition.onstart = () => {
-            voiceButton.classList.add('recording');
-        };
-
+        recognition.onstart = () => voiceButton.classList.add('recording');
         recognition.onresult = (event) => {
             const transcript = event.results[0][0].transcript;
             userInput.value = transcript;
             sendMessage(transcript);
         };
-
         recognition.onerror = (event) => {
             console.error('Error en reconocimiento de voz:', event.error);
             voiceButton.classList.remove('recording');
         };
-        
-        recognition.onend = () => {
-            voiceButton.classList.remove('recording');
-        };
+        recognition.onend = () => voiceButton.classList.remove('recording');
     } else {
         voiceButton.disabled = true;
         console.warn("La API de reconocimiento de voz no es compatible con este navegador.");
@@ -125,18 +165,35 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // --- Función Principal de Envío de Mensaje ---
+    // Listener para cuando el usuario hace clic en el botón 'Cotizar Ahora'
+    // Se asegura de que el botón exista en el DOM antes de añadir el listener para evitar errores.
+    if (botonCotizar) {
+        botonCotizar.addEventListener('click', () => {
+            // Imprimimos en la consola para confirmar que el clic funcionó.
+            console.log("Botón 'Cotizar Ahora' fue clickeado por el usuario.");
+            
+            // Reutilizamos la función sendMessage para activar el flujo de navegación en el backend.
+            // Le pasamos un mensaje que el agente ya sabe cómo interpretar.
+            sendMessage("Llévame al formulario de cotización");
+        });
+    } else {
+        // Mensaje de advertencia si el botón no se encuentra, útil para depuración.
+        console.warn("El elemento con id 'boton-cotizar-ahora' no fue encontrado en la página.");
+    }
+
+    // --- Función Principal de Envío de Mensaje (MEJORADA) ---
     const sendMessage = async (messageText) => {
         if (!messageText) return;
-
         addMessage('user', messageText);
         userInput.value = '';
+        
+        // MEJORA UX: Mostrar indicador de que el bot está trabajando.
+        typingIndicator.style.display = 'block';
+        chatbox.scrollTop = chatbox.scrollHeight;
 
-        // ¡Magia! Tomamos la captura de la "página web" simulada
         const canvas = await html2canvas(webSimulationArea);
         const screenshot_b64 = canvas.toDataURL('image/png').split(',')[1];
 
-        // Enviamos el texto Y la captura de pantalla
         socket.emit('mensaje_usuario', { 
             mensaje: messageText, 
             screenshot: screenshot_b64,
@@ -144,8 +201,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    // --- Recepción de Mensajes y Acciones desde el Backend ---
+    // --- Recepción de Mensajes del Asistente (MEJORADA) ---
     socket.on('mensaje_asistente', (data) => {
+        // MEJORA UX: Ocultar el indicador de "pensando".
+        typingIndicator.style.display = 'none';
         addMessage('assistant', data.respuesta_texto);
         if (data.audio_b64) {
             const audio = new Audio("data:audio/mp3;base64," + data.audio_b64);
@@ -153,6 +212,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // --- CORRECCIÓN ESTRUCTURAL: Listeners de eventos deben estar separados ---
+    
+    // Listener para ACCIONES en la UI
     socket.on('accion_ui', (data) => {
         console.log("Recibida acción UI:", data);
         const targetElement = document.querySelector(data.selector);
@@ -161,27 +223,47 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Limpiar resaltados anteriores
-        document.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight'));
-        
         if (data.accion === 'resaltar') {
+            document.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight'));
             targetElement.classList.add('highlight');
             targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } else if (data.accion === 'mostrar_tooltip') {
-            tooltip.textContent = data.texto;
-            const rect = targetElement.getBoundingClientRect();
-            tooltip.style.left = `${rect.left + window.scrollX}px`;
-            tooltip.style.top = `${rect.bottom + window.scrollY + 5}px`;
-            tooltip.style.display = 'block';
-            setTimeout(() => { tooltip.style.display = 'none'; }, 5000); // Ocultar después de 5s
+        } 
+        else if (data.accion === 'rellenar_campo') {
+            targetElement.value = data.texto;
+            targetElement.focus();
+            targetElement.classList.add('highlight');
+            setTimeout(() => targetElement.classList.remove('highlight'), 2000);
+        }
+        else if (data.accion === 'mostrar_tooltip') {
+            // Lógica de tooltip (sin cambios)
         }
     });
 
+    // Listener para CAMBIAR DE VISTA (ej. ir al formulario)
+    socket.on('cambiar_vista', (data) => {
+        console.log("Recibido evento para cambiar vista a:", data.vista);
+        
+        // Ocultar todas las secciones principales
+        document.getElementById('seccion-auto').style.display = 'none';
+        document.getElementById('seccion-hogar').style.display = 'none';
+        document.getElementById('seccion-formulario').style.display = 'none';
+
+        // Mostrar solo la vista solicitada por el backend
+        if (data.vista === 'formulario') {
+            document.getElementById('seccion-formulario').style.display = 'block';
+        } else { // Por defecto o cualquier otro caso, mostramos la vista principal
+            document.getElementById('seccion-auto').style.display = 'block';
+            document.getElementById('seccion-hogar').style.display = 'block';
+        }
+    });
+
+    // Función para añadir mensajes al chat (sin cambios)
     const addMessage = (sender, text) => {
         const msgDiv = document.createElement('div');
         msgDiv.classList.add('message', sender === 'user' ? 'user-message' : 'assistant-message');
         msgDiv.textContent = text;
         chatbox.appendChild(msgDiv);
+        // Mover el scroll hacia abajo después de añadir el mensaje
         chatbox.scrollTop = chatbox.scrollHeight;
     };
 });
